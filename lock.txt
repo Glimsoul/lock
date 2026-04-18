@@ -1,0 +1,305 @@
+AES-256 + HMAC-SHA256 加密工具 · 代码解析
+AES-256 + HMAC-SHA256 Encryption Tool · Code Walkthrough
+
+================================================================================
+一、项目概述 | Project Overview
+================================================================================
+
+【中文】
+lock.py 是一个基于 AES-256-CBC 和 HMAC-SHA256 的安全加密命令行工具。
+它使用 PBKDF2 将用户密码派生为主密钥，再通过 HKDF 分离出独立的加密密钥与认证密钥，
+实现“加密 + 认证”的强安全模型。该工具专为 Termux (Android) 环境优化，
+同时兼容标准 Linux/macOS 终端。
+
+【English】
+lock.py is a secure command-line encryption tool built on AES-256-CBC and HMAC-SHA256.
+It derives a master key from the user password via PBKDF2, then uses HKDF to separate
+independent encryption and authentication keys, implementing a robust "encrypt-then-MAC"
+security model. The tool is optimized for Termux (Android) but also works on standard
+Linux/macOS terminals.
+
+
+================================================================================
+二、安全架构 | Security Architecture
+================================================================================
+
+【中文】
+组件              算法                          用途
+----------------------------------------------------------------------------
+密钥派生          PBKDF2-HMAC-SHA256 (200,000迭代)  将用户密码转换为固定长度主密钥
+密钥分离          HKDF-SHA256                    从主密钥派生 AES 密钥与 HMAC 密钥
+加密算法          AES-256-CBC                    使用随机 IV 加密明文 (PKCS#7 填充)
+完整性认证        HMAC-SHA256                    对 salt + IV + 密文计算 MAC
+盐值 Salt         随机 16 字节                    抵御彩虹表与密钥复用攻击
+初始化向量 IV     随机 16 字节                    确保相同明文产生不同密文
+
+输出格式：Base64( salt(16) || IV(16) || ciphertext || HMAC(32) )
+所有二进制数据串联后经 Base64 编码，便于复制传输。
+
+【English】
+Component            Algorithm                         Purpose
+----------------------------------------------------------------------------
+Key Derivation       PBKDF2-HMAC-SHA256 (200,000 iter) Derive master key from password
+Key Separation       HKDF-SHA256                       Expand master key into AES and HMAC keys
+Encryption           AES-256-CBC                       Encrypt plaintext with random IV (PKCS#7)
+Authentication       HMAC-SHA256                       MAC over salt + IV + ciphertext
+Salt                 16 random bytes                   Defeat rainbow tables & key reuse
+IV                   16 random bytes                   Ensure distinct ciphertexts for same plaintext
+
+Output Format: Base64( salt(16) || IV(16) || ciphertext || HMAC(32) )
+All binary components are concatenated and Base64-encoded for easy copying.
+
+
+================================================================================
+三、核心函数详解 | Core Functions Explained
+================================================================================
+
+1. derive_keys(password: str, salt: bytes) -> (aes_key, hmac_key)
+
+【中文】
+输入：用户密码（字符串）与随机盐值（字节串）。
+流程：
+  1. 使用 PBKDF2 从密码和盐值生成 32 字节的 master_key。
+  2. 调用 HKDF 两次，分别用不同的 context 字符串
+     (b'AES-256-CBC-ENCRYPTION' 与 b'HMAC-SHA256-AUTHENTICATION')
+     派生 AES 密钥和 HMAC 密钥。
+输出：两个独立的 bytearray 对象，分别用于加密和认证。
+安全要点：密钥分离确保即使攻击者获得 HMAC 密钥，也无法解密数据。
+
+【English】
+Input: User password (string) and random salt (bytes).
+Process:
+  1. PBKDF2 generates a 32-byte master_key from password and salt.
+  2. HKDF is invoked twice with distinct context strings to derive AES key and HMAC key.
+Output: Two independent bytearray objects for encryption and authentication.
+Security Note: Key separation prevents decryption even if the HMAC key is compromised.
+
+
+2. encrypt(plaintext: str, password: str) -> str
+
+【中文】
+步骤：
+  1. 生成随机盐值 (16B) 和随机 IV (16B)。
+  2. 调用 derive_keys() 获得 AES 与 HMAC 密钥。
+  3. 使用 AES-256-CBC 加密明文（自动 PKCS#7 填充）。
+  4. 计算 salt + IV + ciphertext 的 HMAC-SHA256 标签。
+  5. 拼接 salt + IV + ciphertext + hmac 并 Base64 编码。
+返回：Base64 字符串，可直接复制传输。
+
+【English】
+Steps:
+  1. Generate random salt (16B) and random IV (16B).
+  2. Obtain AES and HMAC keys via derive_keys().
+  3. Encrypt plaintext using AES-256-CBC with PKCS#7 padding.
+  4. Compute HMAC-SHA256 over salt + IV + ciphertext.
+  5. Concatenate salt + IV + ciphertext + hmac and encode as Base64.
+Returns: Base64 string ready for copy/paste.
+
+
+3. decrypt(ciphertext_b64: str, password: str) -> str
+
+【中文】
+步骤：
+  1. 移除输入中的空白字符，Base64 解码得到二进制数据。
+  2. 拆分出 salt (前16B)、IV (随后16B)、密文、接收到的 HMAC (最后32B)。
+  3. 使用相同密码和 salt 重新派生密钥。
+  4. 先验证 HMAC：若标签不匹配，立即抛出异常（防止填充预言攻击）。
+  5. HMAC 验证通过后，使用 AES-CBC 解密并去除填充。
+异常处理：任何失败均返回统一错误信息 "Decryption failed"，避免信息泄露。
+
+【English】
+Steps:
+  1. Strip whitespace, decode Base64 to binary.
+  2. Extract salt (first 16B), IV (next 16B), ciphertext, and received HMAC (last 32B).
+  3. Re-derive keys using the provided password and extracted salt.
+  4. Verify HMAC first - abort if mismatch (prevents padding oracle attacks).
+  5. If HMAC is valid, decrypt with AES-CBC and remove padding.
+Error Handling: Unified "Decryption failed" message prevents leakage of internal state.4. input_password(confirm: bool = False) -> str
+
+【中文】
+使用 Python 标准库 getpass 实现无回显密码输入。
+支持密码确认（加密时要求两次输入一致）。
+在 Termux 环境下，getpass 可能导致终端状态异常，但本工具已通过清屏逻辑尽力规避。
+
+【English】
+Uses getpass for echo-free password entry.
+Optional confirmation (required for encryption).
+In Termux, getpass may affect terminal state, but the tool mitigates this with ANSI-based screen clearing.
+
+
+5. copy_to_clipboard(text: str) -> bool
+
+【中文】
+仅在 Termux 环境中有效，调用 termux-clipboard-set 将密文复制到系统剪贴板。
+若未安装 termux-api，该功能静默失败，不影响加密流程。
+
+【English】
+Works only in Termux; invokes termux-clipboard-set to copy ciphertext.
+Fails silently if termux-api is not installed.
+
+
+6. interactive_menu()
+
+【中文】
+提供清屏、加密、解密、退出的循环菜单。
+清屏命令兼容 Termux (clear / cls / ANSI \033c)。
+加密成功后自动尝试复制到剪贴板。
+所有 input() 调用均捕获 KeyboardInterrupt 以优雅退出。
+
+【English】
+Looping menu with screen clear, encrypt, decrypt, and exit options.
+Screen clearing is Termux-compatible (clear / cls / ANSI \033c).
+Automatically attempts clipboard copy after encryption.
+Graceful exit on KeyboardInterrupt.
+
+
+7. command_mode()
+
+【中文】
+支持命令行直接调用：
+  lock.py e "hello world"  -> 加密并输出 Base64 密文
+  lock.py d "Base64..."    -> 解密并输出明文
+密码仍通过安全输入提示，不会在命令行中暴露。
+
+【English】
+Command-line direct usage:
+  lock.py e "hello world"  -> encrypt and print Base64 ciphertext
+  lock.py d "Base64..."    -> decrypt and print plaintext
+Password is still entered interactively (not exposed on the command line).================================================================================
+四、使用示例 | Usage Examples
+================================================================================
+
+【交互模式 | Interactive Mode】
+$ python3 lock.py
+
+  显示菜单：
+    AES-256 + HMAC (HKDF)
+    [1] Encrypt / 加密
+    [2] Decrypt / 解密
+    [3] Exit / 退出
+    Select (1-3) / 请选择 (1-3):
+
+  选择 1 加密：
+    Text to encrypt: Hello World
+    Password: ********
+    Confirm password: ********
+    Encrypted (copy the line below):
+    XJbZ8Dkic7DR/TXAbaozhshaMswWLzBfmN45L+6SC7Jf...
+    (Copied to clipboard / 已复制到剪贴板)
+
+  选择 2 解密：
+    Paste Base64 ciphertext.
+    Ciphertext: [粘贴上述 Base64 字符串]
+    Password: ********
+    Decrypted:
+    Hello World
+
+【命令行模式 | Command-Line Mode】
+$ python3 lock.py e "Sensitive message"
+Password: ********
+Confirm password: ********
+[Base64 ciphertext printed]
+
+$ python3 lock.py d "XJbZ8Dkic7DR..."
+Password: ********
+Sensitive message
+
+
+================================================================================
+五、安全注意事项 | Security Considerations
+================================================================================
+
+【中文】
+1. 密码强度至关重要。建议使用 12 位以上包含大小写、数字、符号的随机密码。
+2. 本工具不存储密码，解密完全依赖用户提供的密码。忘记密码意味着数据永久丢失。
+3. PBKDF2 迭代次数 (200,000) 提供较高抗暴力破解能力，但在低端设备上可能稍有延迟。
+4. 密文格式公开：Base64(salt+IV+ciphertext+HMAC)。即使源码公开，安全性仅依赖于密码强度。
+5. 使用后，密钥会在 finally 块中被零覆盖擦除，降低内存残留风险。
+
+【English】
+1. Password strength is critical. Use a random password of at least 12 characters including upper/lower case, digits, and symbols.
+2. The tool does not store passwords. Decryption relies entirely on the user-provided password. Forgetting the password means permanent data loss.
+3. PBKDF2 iteration count (200,000) provides strong resistance against brute-force, though may cause slight delay on low-end devices.
+4. Ciphertext format is public: Base64(salt+IV+ciphertext+HMAC). Security depends solely on password strength, not algorithm secrecy.
+5. Keys are zeroed out in a finally block after use, reducing residual memory risk.
+
+
+================================================================================
+六、依赖项 | Dependencies
+================================================================================
+
+【中文】
+- Python 3.6 或更高版本
+- PyCryptodome 库 (提供 AES, PBKDF2, HKDF, HMAC)
+
+安装命令：
+  pip install pycryptodome
+
+在 Termux 中安装：
+  pkg install python
+  pip install pycryptodome
+
+【English】
+- Python 3.6 or higher
+- PyCryptodome library (provides AES, PBKDF2, HKDF, HMAC)
+
+Installation:
+  pip install pycryptodome
+
+In Termux:
+  pkg install python
+  pip install pycryptodome
+
+
+================================================================================
+七、常见问题 | FAQ
+================================================================================
+
+Q1: 为什么在 Termux 中按回车后屏幕会空白？
+A1: 这是 Termux 下 getpass 与清屏命令的兼容性问题。本工具使用 ANSI 转义序列清屏，多数情况下正常。若遇异常，按 Ctrl+L 重绘屏幕或重启终端即可。
+
+Q2: 为什么加密结果中会有换行？
+A2: 终端宽度不足时，Base64 长字符串会自动折行显示。复制时请确保选中整段密文，折行不影响解密。
+
+Q3: 可以加密文件吗？
+A3: 本工具目前仅处理文本字符串。加密文件需先将文件内容读取为字符串，或使用专门的文件加密工具。
+
+Q4: 如何验证密文是否被篡改？
+A4: HMAC 验证会自动进行。若密文在传输中被修改，解密时会立即抛出 "Decryption failed"。
+
+【English】
+Q1: Why does the screen go blank after pressing Enter in Termux?
+A1: This is a compatibility issue between getpass and the clear command in Termux. The tool uses ANSI escape sequences for clearing; press Ctrl+L to redraw or restart the terminal if needed.
+
+Q2: Why are there line breaks in the ciphertext output?
+A2: The Base64 string may wrap due to terminal width. Copy the entire block; line breaks do not affect decryption.
+
+Q3: Can it encrypt files?
+A3: Currently only text strings are supported. For files, read the content into a string first or use dedicated file encryption tools.
+
+Q4: How is ciphertext integrity verified?
+A4: HMAC verification is performed automatically. Any tampering will cause an immediate "Decryption failed" error.
+
+
+================================================================================
+八、完整代码获取 | Full Code Access
+================================================================================
+
+【中文】
+完整源代码请参见前文提供的分段复制内容。将三部分按顺序合并保存为 lock.py 即可使用。
+
+【English】
+The full source code is provided in the previous sections. Concatenate the three parts in order and save as lock.py.
+
+================================================================================
+                                  声明 · Notice
+================================================================================
+
+本项目所含文档及配套代码初稿均由 AI 辅助生成，经 Glimsoul 全面审校并最终定稿。
+Glimsoul 对项目内容的准确性与完整性保留最终解释权。
+
+Both the documentation and accompanying code in this project were drafted with AI assistance.
+Reviewed and finalized by Glimsoul, who reserves the right of final interpretation
+regarding the accuracy and completeness of the project content.
+
+================================================================================
